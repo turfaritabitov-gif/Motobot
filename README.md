@@ -17,6 +17,7 @@ python -m venv .venv
 ```
 
 The first user with `ADMIN_USERNAME` who sends `/start` becomes admin and their chat id is saved to settings.
+Additional admins can be listed in `ADMIN_CHAT_IDS` as comma-separated Telegram IDs. Each admin must send `/start` to the bot once before the bot can message them.
 
 ## VPS deployment
 

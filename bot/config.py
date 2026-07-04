@@ -11,9 +11,19 @@ load_dotenv()
 class Config:
     bot_token: str
     admin_username: str
-    admin_chat_id: int | None
+    admin_chat_ids: tuple[int, ...]
     db_path: str
     welcome_photo_path: str
+
+
+def parse_admin_ids(*values: str) -> tuple[int, ...]:
+    ids: list[int] = []
+    for value in values:
+        for chunk in value.replace(";", ",").split(","):
+            chunk = chunk.strip()
+            if chunk.lstrip("-").isdigit():
+                ids.append(int(chunk))
+    return tuple(dict.fromkeys(ids))
 
 
 def load_config() -> Config:
@@ -22,11 +32,11 @@ def load_config() -> Config:
         raise RuntimeError("BOT_TOKEN is not set")
 
     admin_chat_id_raw = os.getenv("ADMIN_CHAT_ID", "").strip()
-    admin_chat_id = int(admin_chat_id_raw) if admin_chat_id_raw.isdigit() else None
+    admin_chat_ids_raw = os.getenv("ADMIN_CHAT_IDS", "").strip()
     return Config(
         bot_token=token,
         admin_username=os.getenv("ADMIN_USERNAME", "").strip().lstrip("@"),
-        admin_chat_id=admin_chat_id,
+        admin_chat_ids=parse_admin_ids(admin_chat_id_raw, admin_chat_ids_raw),
         db_path=os.getenv("DB_PATH", "data/bot.db"),
         welcome_photo_path=os.getenv("WELCOME_PHOTO_PATH", "Фото приветствие.JPG"),
     )

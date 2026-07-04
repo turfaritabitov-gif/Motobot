@@ -14,6 +14,13 @@ router = Router()
 
 
 async def is_admin_user(db: Database, user_id: int) -> bool:
+    ids_raw = await db.get_setting("admin_chat_ids")
+    admin_ids = {int(chunk) for chunk in ids_raw.replace(";", ",").split(",") if chunk.strip().lstrip("-").isdigit()}
+    legacy_id = await db.get_setting("admin_chat_id")
+    if legacy_id.lstrip("-").isdigit():
+        admin_ids.add(int(legacy_id))
+    if user_id in admin_ids:
+        return True
     row = await db.fetchone("SELECT role FROM users WHERE telegram_id = ?", user_id)
     return bool(row and row["role"] == "admin")
 
@@ -36,10 +43,15 @@ async def send_main_menu(message: Message, db: Database, config: Config) -> None
 async def start(message: Message, db: Database, config: Config) -> None:
     username = (message.from_user.username or "").lower()
     admin_username = config.admin_username.lower()
-    role = "admin" if admin_username and username == admin_username else None
+    role = "admin" if (admin_username and username == admin_username) or message.from_user.id in config.admin_chat_ids else None
     await db.upsert_user(message.from_user, role=role)
     if role == "admin":
-        await db.set_setting("admin_chat_id", str(message.from_user.id))
+        rows = await db.fetchall("SELECT telegram_id FROM users WHERE role='admin'")
+        admin_ids = {row["telegram_id"] for row in rows}
+        admin_ids.update(config.admin_chat_ids)
+        await db.set_setting("admin_chat_ids", ",".join(str(admin_id) for admin_id in sorted(admin_ids)))
+        if admin_username and username == admin_username:
+            await db.set_setting("admin_chat_id", str(message.from_user.id))
     await send_main_menu(message, db, config)
 
 

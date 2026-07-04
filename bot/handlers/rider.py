@@ -4,7 +4,7 @@ from aiogram.types import CallbackQuery, Message
 
 from bot.config import Config
 from bot.db import Database, now
-from bot.handlers.client import admin_chat_id
+from bot.handlers.client import admin_chat_ids
 from bot.keyboards import ik, nav, remove_keyboard, yes_no
 from bot.states import RiderFlow
 
@@ -256,13 +256,15 @@ async def rider_submit(callback: CallbackQuery, state: FSMContext, db: Database,
         await db.execute("INSERT INTO rider_photos(rider_id, telegram_file_id, created_at) VALUES(?, ?, ?)", rider_id, file_id, now())
     await db.commit()
     await callback.message.answer("Анкета отправлена администратору. Мы сообщим о решении.", reply_markup=nav())
-    admin_id = await admin_chat_id(db, config)
-    if admin_id:
-        await callback.bot.send_message(
-            admin_id,
-            "Новая анкета райдера.\n\n" + rider_summary(data, rider_id),
-            reply_markup=ik([[("Добавить в базу", f"admin:approve_rider:{rider_id}")], [("Отказать", f"admin:reject_rider:{rider_id}")]]),
-        )
-        for file_id in data.get("photos", []):
-            await callback.bot.send_photo(admin_id, file_id)
+    for admin_id in await admin_chat_ids(db, config):
+        try:
+            await callback.bot.send_message(
+                admin_id,
+                "Новая анкета райдера.\n\n" + rider_summary(data, rider_id),
+                reply_markup=ik([[("Добавить в базу", f"admin:approve_rider:{rider_id}")], [("Отказать", f"admin:reject_rider:{rider_id}")]]),
+            )
+            for file_id in data.get("photos", []):
+                await callback.bot.send_photo(admin_id, file_id)
+        except Exception:
+            pass
     await state.clear()

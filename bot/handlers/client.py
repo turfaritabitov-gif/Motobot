@@ -51,11 +51,19 @@ def request_summary(data: dict, request_id: int | None = None) -> str:
     )
 
 
-async def admin_chat_id(db: Database, config: Config) -> int | None:
-    if config.admin_chat_id:
-        return config.admin_chat_id
-    value = await db.get_setting("admin_chat_id")
-    return int(value) if value.isdigit() else None
+async def admin_chat_ids(db: Database, config: Config) -> list[int]:
+    ids = set(config.admin_chat_ids)
+    legacy_value = await db.get_setting("admin_chat_id")
+    if legacy_value.lstrip("-").isdigit():
+        ids.add(int(legacy_value))
+    values = await db.get_setting("admin_chat_ids")
+    for chunk in values.replace(";", ",").split(","):
+        chunk = chunk.strip()
+        if chunk.lstrip("-").isdigit():
+            ids.add(int(chunk))
+    rows = await db.fetchall("SELECT telegram_id FROM users WHERE role='admin' AND is_blocked=0")
+    ids.update(row["telegram_id"] for row in rows)
+    return sorted(ids)
 
 
 @router.callback_query(F.data == "client:start")
@@ -418,11 +426,13 @@ async def submit(callback: CallbackQuery, state: FSMContext, db: Database, confi
     await db.commit()
     request_id = cursor.lastrowid
     await callback.message.answer(f"Заявка №{request_id} принята. Администратор подберет райдера и свяжется с вами.", reply_markup=nav())
-    admin_id = await admin_chat_id(db, config)
-    if admin_id:
-        await callback.bot.send_message(
-            admin_id,
-            "Новая клиентская заявка.\n\n" + request_summary(data, request_id),
-            reply_markup=ik([[("Отправить подходящим райдерам", f"admin:send_riders:{request_id}")], [("Отказать", f"admin:reject_client:{request_id}")]]),
-        )
+    for admin_id in await admin_chat_ids(db, config):
+        try:
+            await callback.bot.send_message(
+                admin_id,
+                "Новая клиентская заявка.\n\n" + request_summary(data, request_id),
+                reply_markup=ik([[("Отправить подходящим райдерам", f"admin:send_riders:{request_id}")], [("Отказать", f"admin:reject_client:{request_id}")]]),
+            )
+        except Exception:
+            pass
     await state.clear()

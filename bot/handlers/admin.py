@@ -3,7 +3,9 @@ from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message
 
+from bot.config import Config
 from bot.db import Database, now
+from bot.handlers.client import admin_chat_ids
 from bot.handlers.common import is_admin_user
 from bot.keyboards import ik, nav
 from bot.states import AdminFlow
@@ -39,6 +41,16 @@ async def require_admin(event: Message | CallbackQuery, db: Database) -> bool:
         else:
             await event.answer("Эта команда доступна только администратору.")
     return ok
+
+
+async def notify_other_admins(bot, db: Database, config: Config, actor_id: int, text: str) -> None:
+    for admin_id in await admin_chat_ids(db, config):
+        if admin_id == actor_id:
+            continue
+        try:
+            await bot.send_message(admin_id, text)
+        except Exception:
+            pass
 
 
 def request_card(row) -> str:
@@ -143,13 +155,17 @@ async def list_pending_riders(callback: CallbackQuery, db: Database) -> None:
 
 
 @router.callback_query(F.data.startswith("admin:approve_rider:"))
-async def approve_rider(callback: CallbackQuery, db: Database) -> None:
+async def approve_rider(callback: CallbackQuery, db: Database, config: Config) -> None:
     if not await require_admin(callback, db):
         return
     rider_id = int(callback.data.rsplit(":", 1)[1])
     row = await db.fetchone("SELECT * FROM riders WHERE id=?", rider_id)
     if not row:
         await callback.answer("Райдер не найден.", show_alert=True)
+        return
+    if row["status"] != "pending":
+        await callback.answer("Эта заявка райдера уже отработана, повторно её обработать нельзя.", show_alert=True)
+        await callback.message.answer("Эта заявка райдера уже отработана, повторно её обработать нельзя.")
         return
     await db.execute("UPDATE riders SET status='approved', updated_at=? WHERE id=?", now(), rider_id)
     await db.commit()
@@ -158,6 +174,7 @@ async def approve_rider(callback: CallbackQuery, db: Database) -> None:
         await callback.bot.send_message(row["telegram_id"], "Ваша анкета одобрена. Теперь вы можете получать заявки на мотопрогулки.")
     await callback.answer("Райдер одобрен.")
     await callback.message.answer(f"Райдер №{rider_id} добавлен в базу.")
+    await notify_other_admins(callback.bot, db, config, callback.from_user.id, f"Анкета райдера №{rider_id} уже отработана другим администратором.")
 
 
 @router.callback_query(F.data.startswith("admin:reject_rider:"))
@@ -165,6 +182,11 @@ async def reject_rider_start(callback: CallbackQuery, state: FSMContext, db: Dat
     if not await require_admin(callback, db):
         return
     rider_id = int(callback.data.rsplit(":", 1)[1])
+    row = await db.fetchone("SELECT status FROM riders WHERE id=?", rider_id)
+    if not row or row["status"] != "pending":
+        await callback.answer("Эта заявка райдера уже отработана, повторно её обработать нельзя.", show_alert=True)
+        await callback.message.answer("Эта заявка райдера уже отработана, повторно её обработать нельзя.")
+        return
     await state.set_state(AdminFlow.reject_rider)
     await state.update_data(reject_rider_id=rider_id)
     await callback.answer()
@@ -172,13 +194,18 @@ async def reject_rider_start(callback: CallbackQuery, state: FSMContext, db: Dat
 
 
 @router.callback_query(F.data.startswith("admin:reject_rider_reason:"))
-async def reject_rider_finish(callback: CallbackQuery, state: FSMContext, db: Database) -> None:
+async def reject_rider_finish(callback: CallbackQuery, state: FSMContext, db: Database, config: Config) -> None:
     if not await require_admin(callback, db):
         return
     data = await state.get_data()
     rider_id = data["reject_rider_id"]
     reason = callback.data.removeprefix("admin:reject_rider_reason:")
-    row = await db.fetchone("SELECT telegram_id FROM riders WHERE id=?", rider_id)
+    row = await db.fetchone("SELECT telegram_id, status FROM riders WHERE id=?", rider_id)
+    if not row or row["status"] != "pending":
+        await state.clear()
+        await callback.answer("Эта заявка райдера уже отработана, повторно её обработать нельзя.", show_alert=True)
+        await callback.message.answer("Эта заявка райдера уже отработана, повторно её обработать нельзя.")
+        return
     await db.execute("UPDATE riders SET status='rejected', admin_comment=?, updated_at=? WHERE id=?", reason, now(), rider_id)
     await db.commit()
     await db.add_admin_log(callback.from_user.id, "reject_rider", "rider", rider_id)
@@ -186,6 +213,7 @@ async def reject_rider_finish(callback: CallbackQuery, state: FSMContext, db: Da
         await callback.bot.send_message(row["telegram_id"], f"К сожалению, анкета отклонена. Причина: {reason}.")
     await state.clear()
     await callback.answer("Отказ отправлен.")
+    await notify_other_admins(callback.bot, db, config, callback.from_user.id, f"Анкета райдера №{rider_id} уже отработана другим администратором.")
 
 
 async def matching_riders(db: Database, request_id: int):
@@ -218,13 +246,17 @@ async def matching_riders(db: Database, request_id: int):
 
 
 @router.callback_query(F.data.startswith("admin:send_riders:"))
-async def send_to_riders(callback: CallbackQuery, db: Database) -> None:
+async def send_to_riders(callback: CallbackQuery, db: Database, config: Config) -> None:
     if not await require_admin(callback, db):
         return
     request_id = int(callback.data.rsplit(":", 1)[1])
     req, riders = await matching_riders(db, request_id)
     if not req:
         await callback.answer("Заявка не найдена.", show_alert=True)
+        return
+    if req["status"] != "new":
+        await callback.answer("Эта заявка клиента уже отработана, повторно её обработать нельзя.", show_alert=True)
+        await callback.message.answer("Эта заявка клиента уже отработана, повторно её обработать нельзя.")
         return
     if not riders:
         await callback.message.answer(f"По заявке №{request_id} подходящих активных райдеров не найдено.")
@@ -250,10 +282,11 @@ async def send_to_riders(callback: CallbackQuery, db: Database) -> None:
     await db.add_admin_log(callback.from_user.id, "send_to_riders", "request", request_id)
     await callback.answer("Отправлено.")
     await callback.message.answer(f"Заявка №{request_id} отправлена райдерам: {len(riders)}.")
+    await notify_other_admins(callback.bot, db, config, callback.from_user.id, f"Клиентская заявка №{request_id} уже отработана другим администратором.")
 
 
 @router.callback_query(F.data.startswith("rresp:"))
-async def rider_response(callback: CallbackQuery, db: Database) -> None:
+async def rider_response(callback: CallbackQuery, db: Database, config: Config) -> None:
     parts = callback.data.split(":")
     action, request_id, rider_id = parts[1], int(parts[2]), int(parts[3])
     status = "accepted" if action == "accept" else "declined"
@@ -261,20 +294,23 @@ async def rider_response(callback: CallbackQuery, db: Database) -> None:
     if status == "accepted":
         await db.execute("UPDATE client_requests SET status='rider_accepted', updated_at=? WHERE id=?", now(), request_id)
     await db.commit()
-    admin_id = await db.get_setting("admin_chat_id")
     rider = await db.fetchone("SELECT * FROM riders WHERE id=?", rider_id)
-    if admin_id.isdigit() and status == "accepted":
-        await callback.bot.send_message(
-            int(admin_id),
-            f"Райдер откликнулся на заявку №{request_id}\n\n{rider_card(rider)}",
-            reply_markup=ik([[("Назначить этого райдера", f"admin:assign:{request_id}:{rider_id}")], [("Не назначать", f"admin:not_assign:{request_id}:{rider_id}")]]),
-        )
+    if status == "accepted":
+        for admin_id in await admin_chat_ids(db, config):
+            try:
+                await callback.bot.send_message(
+                    admin_id,
+                    f"Райдер откликнулся на заявку №{request_id}\n\n{rider_card(rider)}",
+                    reply_markup=ik([[("Назначить этого райдера", f"admin:assign:{request_id}:{rider_id}")], [("Не назначать", f"admin:not_assign:{request_id}:{rider_id}")]]),
+                )
+            except Exception:
+                pass
     await callback.answer("Ответ сохранен.")
     await callback.message.answer("Спасибо, ответ передан администратору.")
 
 
 @router.callback_query(F.data.startswith("admin:assign:"))
-async def assign_rider(callback: CallbackQuery, db: Database) -> None:
+async def assign_rider(callback: CallbackQuery, db: Database, config: Config) -> None:
     if not await require_admin(callback, db):
         return
     _, _, request_id_raw, rider_id_raw = callback.data.split(":")
@@ -283,6 +319,10 @@ async def assign_rider(callback: CallbackQuery, db: Database) -> None:
     rider = await db.fetchone("SELECT * FROM riders WHERE id=?", rider_id)
     if not req or not rider:
         await callback.answer("Не найдено.", show_alert=True)
+        return
+    if req["status"] == "rider_assigned" or req["status"] == "rejected":
+        await callback.answer("Эта заявка клиента уже отработана, повторно её обработать нельзя.", show_alert=True)
+        await callback.message.answer("Эта заявка клиента уже отработана, повторно её обработать нельзя.")
         return
     await db.execute("UPDATE client_requests SET status='rider_assigned', assigned_rider_id=?, updated_at=? WHERE id=?", rider_id, now(), request_id)
     await db.commit()
@@ -319,20 +359,26 @@ async def assign_rider(callback: CallbackQuery, db: Database) -> None:
     )
     await callback.answer("Райдер назначен.")
     await callback.message.answer(f"Райдер №{rider_id} назначен на заявку №{request_id}.")
+    await notify_other_admins(callback.bot, db, config, callback.from_user.id, f"Клиентская заявка №{request_id} уже отработана другим администратором.")
 
 
 @router.callback_query(F.data.startswith("admin:reject_client:"))
-async def reject_client(callback: CallbackQuery, db: Database) -> None:
+async def reject_client(callback: CallbackQuery, db: Database, config: Config) -> None:
     if not await require_admin(callback, db):
         return
     request_id = int(callback.data.rsplit(":", 1)[1])
-    req = await db.fetchone("SELECT telegram_id FROM client_requests WHERE id=?", request_id)
+    req = await db.fetchone("SELECT telegram_id, status FROM client_requests WHERE id=?", request_id)
+    if not req or req["status"] != "new":
+        await callback.answer("Эта заявка клиента уже отработана, повторно её обработать нельзя.", show_alert=True)
+        await callback.message.answer("Эта заявка клиента уже отработана, повторно её обработать нельзя.")
+        return
     await db.execute("UPDATE client_requests SET status='rejected', updated_at=? WHERE id=?", now(), request_id)
     await db.commit()
     await db.add_admin_log(callback.from_user.id, "reject_client", "request", request_id)
     if req:
         await callback.bot.send_message(req["telegram_id"], "К сожалению, сейчас не получилось организовать мотопрогулку. Администратор может связаться с вами для уточнения.")
     await callback.answer("Заявка отклонена.")
+    await notify_other_admins(callback.bot, db, config, callback.from_user.id, f"Клиентская заявка №{request_id} уже отработана другим администратором.")
 
 
 @router.callback_query(F.data == "admin:manual_rider")
