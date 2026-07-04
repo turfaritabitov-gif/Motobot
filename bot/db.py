@@ -30,6 +30,7 @@ CREATE TABLE IF NOT EXISTS client_requests (
     client_weight INTEGER NOT NULL,
     client_phone TEXT,
     client_username TEXT,
+    ride_mode TEXT NOT NULL DEFAULT 'money',
     motorcycle_class TEXT NOT NULL,
     route_type TEXT NOT NULL,
     date TEXT NOT NULL,
@@ -63,6 +64,8 @@ CREATE TABLE IF NOT EXISTS riders (
     motorcycle_model TEXT NOT NULL,
     passenger_equipment TEXT NOT NULL,
     max_passenger_weight INTEGER NOT NULL,
+    ride_for_money INTEGER NOT NULL DEFAULT 1,
+    ride_by_rules INTEGER NOT NULL DEFAULT 0,
     can_pickup_client INTEGER NOT NULL DEFAULT 0,
     can_ride_night INTEGER NOT NULL DEFAULT 0,
     can_individual_route INTEGER NOT NULL DEFAULT 0,
@@ -151,6 +154,7 @@ class Database:
         self.conn = await aiosqlite.connect(self.path)
         self.conn.row_factory = aiosqlite.Row
         await self.conn.executescript(SCHEMA)
+        await self.ensure_columns()
         for key, value in DEFAULT_SETTINGS.items():
             await self.execute(
                 "INSERT OR IGNORE INTO settings(key, value, updated_at) VALUES(?, ?, ?)",
@@ -159,6 +163,18 @@ class Database:
                 now(),
             )
         await self.conn.commit()
+
+    async def ensure_columns(self) -> None:
+        assert self.conn
+        existing = {row["name"] for row in await self.fetchall("PRAGMA table_info(client_requests)")}
+        if "ride_mode" not in existing:
+            await self.execute("ALTER TABLE client_requests ADD COLUMN ride_mode TEXT NOT NULL DEFAULT 'money'")
+
+        existing = {row["name"] for row in await self.fetchall("PRAGMA table_info(riders)")}
+        if "ride_for_money" not in existing:
+            await self.execute("ALTER TABLE riders ADD COLUMN ride_for_money INTEGER NOT NULL DEFAULT 1")
+        if "ride_by_rules" not in existing:
+            await self.execute("ALTER TABLE riders ADD COLUMN ride_by_rules INTEGER NOT NULL DEFAULT 0")
 
     async def close(self) -> None:
         if self.conn:

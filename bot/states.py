@@ -2,6 +2,8 @@ from aiogram.fsm.state import State, StatesGroup
 
 
 class ClientFlow(StatesGroup):
+    ride_mode = State()
+    rule_check = State()
     name = State()
     age = State()
     minor_confirm = State()
@@ -24,6 +26,8 @@ class ClientFlow(StatesGroup):
 
 
 class RiderFlow(StatesGroup):
+    ride_modes = State()
+    rule_check = State()
     name = State()
     age = State()
     seasons = State()
@@ -53,6 +57,8 @@ class AdminFlow(StatesGroup):
     manual_rider_motorcycle_model = State()
     manual_rider_equipment = State()
     manual_rider_max_passenger_weight = State()
+    manual_rider_ride_modes = State()
+    manual_rider_rule_check = State()
     manual_rider_can_pickup_client = State()
     manual_rider_can_ride_night = State()
     manual_rider_can_individual_route = State()

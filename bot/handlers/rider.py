@@ -13,6 +13,15 @@ router = Router()
 CLASSES = ["Дорожный", "Классик / Кастом", "Спорт", "Электро"]
 
 
+def ride_modes_text(data: dict) -> str:
+    modes = []
+    if data.get("ride_for_money"):
+        modes.append("За деньги")
+    if data.get("ride_by_rules"):
+        modes.append("По правилу")
+    return ", ".join(modes) or "-"
+
+
 def rider_summary(data: dict, rider_id: int | None = None) -> str:
     title = f"Анкета райдера №{rider_id}\n\n" if rider_id else "Проверьте анкету:\n\n"
     return (
@@ -20,6 +29,7 @@ def rider_summary(data: dict, rider_id: int | None = None) -> str:
         f"Имя: {data.get('name')}\n"
         f"Возраст: {data.get('age')}\n"
         f"Опыт: {data.get('seasons')} сезонов\n"
+        f"Как готов возить: {ride_modes_text(data)}\n"
         f"Класс: {data.get('motorcycle_class')}\n"
         f"Мотоцикл: {data.get('motorcycle_model')}\n"
         f"Экип: {data.get('passenger_equipment')}\n"
@@ -37,8 +47,44 @@ def rider_summary(data: dict, rider_id: int | None = None) -> str:
 async def start_rider(callback: CallbackQuery, state: FSMContext) -> None:
     await callback.answer()
     await state.clear()
+    await state.set_state(RiderFlow.ride_modes)
+    await callback.message.answer(
+        "Как готов возить?",
+        reply_markup=ik([[("За деньги", "rider:ride_modes:money"), ("По правилу", "rider:ride_modes:rules")], [("Оба варианта", "rider:ride_modes:both")], [("Главное меню", "common:menu")]]),
+    )
+
+
+@router.callback_query(F.data.startswith("rider:ride_modes:"))
+async def rider_ride_modes(callback: CallbackQuery, state: FSMContext) -> None:
+    await callback.answer()
+    value = callback.data.rsplit(":", 1)[1]
+    await state.update_data(
+        ride_for_money=value in {"money", "both"},
+        ride_by_rules=value in {"rules", "both"},
+    )
+    if value in {"rules", "both"}:
+        await state.set_state(RiderFlow.rule_check)
+        await callback.message.answer('Проверка правила. Продолжи фразу "Уронил -".')
+        return
+    await ask_rider_name(callback.message, state)
+
+
+@router.message(RiderFlow.rule_check)
+async def rider_rule_check(message: Message, state: FSMContext) -> None:
+    answer = (message.text or "").strip().lower()
+    if answer != "женился":
+        await state.clear()
+        await message.answer(
+            "Предлагаем ознакомиться с правилом самостоятельно и вернуться в главное меню.",
+            reply_markup=nav(),
+        )
+        return
+    await ask_rider_name(message, state)
+
+
+async def ask_rider_name(message: Message, state: FSMContext) -> None:
     await state.set_state(RiderFlow.name)
-    await callback.message.answer("Как вас зовут?", reply_markup=nav("common:menu"))
+    await message.answer("Как вас зовут?", reply_markup=nav("common:menu"))
 
 
 @router.message(RiderFlow.name)
@@ -181,9 +227,9 @@ async def rider_submit(callback: CallbackQuery, state: FSMContext, db: Database,
         """
         INSERT INTO riders(
             telegram_id, username, name, age, seasons, motorcycle_class, motorcycle_model, passenger_equipment,
-            max_passenger_weight, can_pickup_client, can_ride_night, can_individual_route, base_area, status,
+            max_passenger_weight, ride_for_money, ride_by_rules, can_pickup_client, can_ride_night, can_individual_route, base_area, status,
             admin_comment, created_at, updated_at
-        ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?)
+        ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?)
         """,
         callback.from_user.id,
         callback.from_user.username,
@@ -194,6 +240,8 @@ async def rider_submit(callback: CallbackQuery, state: FSMContext, db: Database,
         data["motorcycle_model"],
         data["passenger_equipment"],
         data["max_passenger_weight"],
+        int(data.get("ride_for_money", True)),
+        int(data.get("ride_by_rules", False)),
         int(data["can_pickup_client"]),
         int(data["can_ride_night"]),
         int(data["can_individual_route"]),

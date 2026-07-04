@@ -10,6 +10,25 @@ from bot.states import AdminFlow
 
 router = Router()
 
+RIDE_MODES = {
+    "money": "За деньги",
+    "rules": "По правилам",
+}
+
+
+def rider_modes_text(row_or_data) -> str:
+    def value(key: str):
+        if hasattr(row_or_data, "keys") and key in row_or_data.keys():
+            return row_or_data[key]
+        return row_or_data.get(key)
+
+    modes = []
+    if value("ride_for_money"):
+        modes.append("За деньги")
+    if value("ride_by_rules"):
+        modes.append("По правилу")
+    return ", ".join(modes) or "-"
+
 
 async def require_admin(event: Message | CallbackQuery, db: Database) -> bool:
     user = event.from_user
@@ -28,6 +47,7 @@ def request_card(row) -> str:
         f"Заявка №{row['id']}\n"
         f"Клиент: {row['client_name']}, {row['client_age']} лет\n"
         f"Параметры: {row['client_height']} см / {row['client_weight']} кг\n"
+        f"Формат катания: {RIDE_MODES.get(row['ride_mode'], 'За деньги')}\n"
         f"Класс: {row['motorcycle_class']}\n"
         f"Маршрут: {row['route_type']}\n"
         f"Дата/время: {row['date']}, {row['time_slot']}\n"
@@ -43,6 +63,7 @@ def rider_card(row) -> str:
         f"Telegram: @{row['username'] or '-'} / ID {row['telegram_id'] or '-'}\n"
         f"Возраст: {row['age']}\n"
         f"Опыт: {row['seasons']} сезонов\n"
+        f"Как возит: {rider_modes_text(row)}\n"
         f"Мотоцикл: {row['motorcycle_model']}\n"
         f"Класс: {row['motorcycle_class']}\n"
         f"Экип: {row['passenger_equipment']}\n"
@@ -59,6 +80,7 @@ def manual_rider_summary(data: dict) -> str:
         f"Telegram: @{username or '-'} / ID {tg_id or '-'}\n"
         f"Возраст: {data.get('age')}\n"
         f"Опыт: {data.get('seasons')} сезонов\n"
+        f"Как возит: {rider_modes_text(data)}\n"
         f"Класс: {data.get('motorcycle_class')}\n"
         f"Мотоцикл: {data.get('motorcycle_model')}\n"
         f"Экип: {data.get('passenger_equipment')}\n"
@@ -177,6 +199,8 @@ async def matching_riders(db: Database, request_id: int):
           AND motorcycle_class=?
           AND max_passenger_weight>=?
           AND (telegram_id IS NOT NULL)
+          AND (? != 'money' OR ride_for_money=1)
+          AND (? != 'rules' OR ride_by_rules=1)
           AND (? != 'custom_pickup' OR can_pickup_client=1)
           AND (? != 'Ночь - 00:00-06:00' OR can_ride_night=1)
           AND (? != 'Индивидуальный маршрут' OR can_individual_route=1)
@@ -184,6 +208,8 @@ async def matching_riders(db: Database, request_id: int):
         """,
         req["motorcycle_class"],
         req["client_weight"],
+        req["ride_mode"],
+        req["ride_mode"],
         req["pickup_type"],
         req["time_slot"],
         req["route_type"],
@@ -208,6 +234,7 @@ async def send_to_riders(callback: CallbackQuery, db: Database) -> None:
             rider["telegram_id"],
             (
                 f"Новая подходящая заявка №{request_id}\n\n"
+                f"Формат катания: {RIDE_MODES.get(req['ride_mode'], 'За деньги')}\n"
                 f"Класс: {req['motorcycle_class']}\n"
                 f"Маршрут: {req['route_type']}\n"
                 f"Дата: {req['date']}\n"
@@ -269,6 +296,7 @@ async def assign_rider(callback: CallbackQuery, db: Database) -> None:
             f"Возраст: {rider['age']} лет\n"
             f"Опыт: {rider['seasons']} сезонов\n"
             f"Мотоцикл: {rider['motorcycle_model']}\n"
+            f"Формат катания: {RIDE_MODES.get(req['ride_mode'], 'За деньги')}\n"
             f"Дата: {req['date']}\n"
             f"Время: {req['time_slot']}\n"
             f"Точка посадки: {req['pickup_address']}\n"
@@ -282,6 +310,7 @@ async def assign_rider(callback: CallbackQuery, db: Database) -> None:
             f"Вы назначены на заявку №{request_id}.\n\n"
             f"Клиент: {req['client_name']}\n"
             f"Контакт: {req['client_phone'] or req['client_username'] or 'через бота'}\n"
+            f"Формат катания: {RIDE_MODES.get(req['ride_mode'], 'За деньги')}\n"
             f"Дата: {req['date']}\n"
             f"Время: {req['time_slot']}\n"
             f"Точка посадки: {req['pickup_address']}\n"
@@ -447,6 +476,46 @@ async def manual_rider_max_weight(message: Message, state: FSMContext, db: Datab
         await message.answer("Укажите вес числом от 35 до 220.")
         return
     await state.update_data(max_passenger_weight=int(message.text))
+    await state.set_state(AdminFlow.manual_rider_ride_modes)
+    await message.answer(
+        "Как райдер готов возить?",
+        reply_markup=ik([[("За деньги", "admin_manual:ride_modes:money"), ("По правилу", "admin_manual:ride_modes:rules")], [("Оба варианта", "admin_manual:ride_modes:both")]]),
+    )
+
+
+@router.callback_query(F.data.startswith("admin_manual:ride_modes:"))
+async def manual_rider_ride_modes(callback: CallbackQuery, state: FSMContext, db: Database) -> None:
+    if not await require_admin(callback, db):
+        return
+    await callback.answer()
+    value = callback.data.rsplit(":", 1)[1]
+    await state.update_data(
+        ride_for_money=value in {"money", "both"},
+        ride_by_rules=value in {"rules", "both"},
+    )
+    if value in {"rules", "both"}:
+        await state.set_state(AdminFlow.manual_rider_rule_check)
+        await callback.message.answer('Проверка правила. Продолжи фразу "Уронил -".')
+        return
+    await ask_manual_rider_pickup(callback.message, state)
+
+
+@router.message(AdminFlow.manual_rider_rule_check)
+async def manual_rider_rule_check(message: Message, state: FSMContext, db: Database) -> None:
+    if not await require_admin(message, db):
+        return
+    answer = (message.text or "").strip().lower()
+    if answer != "женился":
+        await state.clear()
+        await message.answer(
+            "Предлагаем ознакомиться с правилом самостоятельно и вернуться в админ-панель.",
+            reply_markup=ik([[("Админ-панель", "admin:panel")]]),
+        )
+        return
+    await ask_manual_rider_pickup(message, state)
+
+
+async def ask_manual_rider_pickup(message: Message, state: FSMContext) -> None:
     await state.set_state(AdminFlow.manual_rider_can_pickup_client)
     await message.answer("Райдер готов забирать клиента с адреса?", reply_markup=ik([[("Да", "admin_manual:pickup:yes"), ("Нет", "admin_manual:pickup:no")]]))
 
@@ -556,9 +625,9 @@ async def manual_rider_save(callback: CallbackQuery, state: FSMContext, db: Data
         """
         INSERT INTO riders(
             telegram_id, username, name, age, seasons, motorcycle_class, motorcycle_model, passenger_equipment,
-            max_passenger_weight, can_pickup_client, can_ride_night, can_individual_route, base_area, status,
+            max_passenger_weight, ride_for_money, ride_by_rules, can_pickup_client, can_ride_night, can_individual_route, base_area, status,
             admin_comment, created_at, updated_at
-        ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'approved', ?, ?, ?)
+        ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'approved', ?, ?, ?)
         """,
         data.get("telegram_id"),
         data.get("username"),
@@ -569,6 +638,8 @@ async def manual_rider_save(callback: CallbackQuery, state: FSMContext, db: Data
         data["motorcycle_model"],
         data["passenger_equipment"],
         data["max_passenger_weight"],
+        int(data.get("ride_for_money", True)),
+        int(data.get("ride_by_rules", False)),
         int(data["can_pickup_client"]),
         int(data["can_ride_night"]),
         int(data["can_individual_route"]),
@@ -590,30 +661,3 @@ async def manual_rider_save(callback: CallbackQuery, state: FSMContext, db: Data
         "Если райдер еще не запускал бота, попросите его открыть бот и нажать /start, иначе бот не сможет отправлять ему заявки.",
         reply_markup=nav(),
     )
-    tg_id = None if parts[2] == "-" else int(parts[2])
-    await db.execute(
-        """
-        INSERT INTO riders(telegram_id, username, name, age, seasons, motorcycle_class, motorcycle_model, passenger_equipment,
-        max_passenger_weight, can_pickup_client, can_ride_night, can_individual_route, base_area, status, admin_comment, created_at, updated_at)
-        VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'approved', ?, ?, ?)
-        """,
-        tg_id,
-        parts[1].lstrip("@"),
-        parts[0],
-        int(parts[3]),
-        int(parts[4]),
-        parts[5],
-        parts[6],
-        parts[7],
-        int(parts[8]),
-        1 if parts[9].lower() == "да" else 0,
-        1 if parts[10].lower() == "да" else 0,
-        1 if parts[11].lower() == "да" else 0,
-        parts[12],
-        parts[13],
-        now(),
-        now(),
-    )
-    await db.commit()
-    await state.clear()
-    await message.answer("Райдер добавлен в базу.", reply_markup=nav())
