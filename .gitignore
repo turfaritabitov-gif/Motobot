@@ -1,0 +1,11 @@
+.env
+*.db
+*.sqlite3
+__pycache__/
+.venv/
+venv/
+data/*.db
+tools/
+*.zip
+*.tar.gz
+Доступы.docx

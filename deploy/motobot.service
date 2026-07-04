@@ -1,0 +1,15 @@
+[Unit]
+Description=Kazan moto Telegram bot
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/motobot
+EnvironmentFile=/opt/motobot/.env
+ExecStart=/opt/motobot/.venv/bin/python -m bot.main
+Restart=always
+RestartSec=5
+User=root
+
+[Install]
+WantedBy=multi-user.target
