@@ -48,6 +48,7 @@ class AdminFlow(StatesGroup):
     message_target = State()
     reject_client = State()
     reject_rider = State()
+    edit_rider_value = State()
     manual_rider_name = State()
     manual_rider_username = State()
     manual_rider_telegram_id = State()

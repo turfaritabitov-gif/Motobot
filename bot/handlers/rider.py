@@ -261,10 +261,8 @@ async def rider_submit(callback: CallbackQuery, state: FSMContext, db: Database,
             await callback.bot.send_message(
                 admin_id,
                 "Новая анкета райдера.\n\n" + rider_summary(data, rider_id),
-                reply_markup=ik([[("Добавить в базу", f"admin:approve_rider:{rider_id}")], [("Отказать", f"admin:reject_rider:{rider_id}")]]),
+                reply_markup=ik([[("Добавить в базу", f"admin:approve_rider:{rider_id}"), ("Фото", f"admin:rider_photos:{rider_id}")], [("Отказать", f"admin:reject_rider:{rider_id}")]]),
             )
-            for file_id in data.get("photos", []):
-                await callback.bot.send_photo(admin_id, file_id)
         except Exception:
             pass
     await state.clear()

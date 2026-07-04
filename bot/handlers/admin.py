@@ -17,6 +17,19 @@ RIDE_MODES = {
     "rules": "По правилам",
 }
 
+EDIT_RIDER_TEXT_FIELDS = {
+    "name": ("name", "имя", "Укажите новое имя райдера."),
+    "username": ("username", "Telegram username", "Укажите новый username без @ или '-' чтобы очистить."),
+    "telegram_id": ("telegram_id", "Telegram ID", "Укажите новый Telegram ID числом или '-' чтобы очистить."),
+    "age": ("age", "возраст", "Укажите новый возраст числом от 18 до 80."),
+    "seasons": ("seasons", "опыт", "Укажите новый опыт в сезонах."),
+    "model": ("motorcycle_model", "мотоцикл", "Укажите новую марку и модель мотоцикла."),
+    "equipment": ("passenger_equipment", "экип", "Опишите экипировку для пассажира."),
+    "max_weight": ("max_passenger_weight", "максимальный вес", "Укажите новый максимальный вес пассажира."),
+    "area": ("base_area", "район", "Укажите новый район базирования."),
+    "comment": ("admin_comment", "комментарий", "Укажите новый комментарий или '-' чтобы очистить."),
+}
+
 
 def rider_modes_text(row_or_data) -> str:
     def value(key: str):
@@ -79,7 +92,38 @@ def rider_card(row) -> str:
         f"Мотоцикл: {row['motorcycle_model']}\n"
         f"Класс: {row['motorcycle_class']}\n"
         f"Экип: {row['passenger_equipment']}\n"
-        f"Макс. вес: {row['max_passenger_weight']} кг"
+        f"Макс. вес: {row['max_passenger_weight']} кг\n"
+        f"Забор клиента: {'да' if row['can_pickup_client'] else 'нет'}\n"
+        f"Ночь: {'да' if row['can_ride_night'] else 'нет'}\n"
+        f"Индивидуальные маршруты: {'да' if row['can_individual_route'] else 'нет'}\n"
+        f"Район: {row['base_area'] or '-'}\n"
+        f"Комментарий: {row['admin_comment'] or '-'}"
+    )
+
+
+def rider_manage_keyboard(rider_id: int):
+    return ik(
+        [
+            [("Редактировать", f"admin:rider_edit:{rider_id}"), ("Фото", f"admin:rider_photos:{rider_id}")],
+            [("Удалить", f"admin:rider_delete_confirm:{rider_id}")],
+            [("Все одобренные", "admin:list_approved_riders"), ("Админ-панель", "admin:panel")],
+        ]
+    )
+
+
+def rider_edit_keyboard(rider_id: int):
+    return ik(
+        [
+            [("Имя", f"admin:rider_edit_field:{rider_id}:name"), ("Username", f"admin:rider_edit_field:{rider_id}:username")],
+            [("Telegram ID", f"admin:rider_edit_field:{rider_id}:telegram_id"), ("Возраст", f"admin:rider_edit_field:{rider_id}:age")],
+            [("Опыт", f"admin:rider_edit_field:{rider_id}:seasons"), ("Класс", f"admin:rider_edit_field:{rider_id}:class")],
+            [("Мотоцикл", f"admin:rider_edit_field:{rider_id}:model"), ("Экип", f"admin:rider_edit_field:{rider_id}:equipment")],
+            [("Макс. вес", f"admin:rider_edit_field:{rider_id}:max_weight"), ("Как возит", f"admin:rider_edit_field:{rider_id}:ride_modes")],
+            [("Забор", f"admin:rider_edit_field:{rider_id}:pickup"), ("Ночь", f"admin:rider_edit_field:{rider_id}:night")],
+            [("Индив. маршруты", f"admin:rider_edit_field:{rider_id}:individual"), ("Район", f"admin:rider_edit_field:{rider_id}:area")],
+            [("Комментарий", f"admin:rider_edit_field:{rider_id}:comment")],
+            [("Назад", f"admin:rider:{rider_id}")],
+        ]
     )
 
 
@@ -114,7 +158,7 @@ async def admin_panel(callback: CallbackQuery, state: FSMContext, db: Database) 
     await callback.answer()
     await callback.message.answer(
         "Админ-панель",
-        reply_markup=ik([[("Новые заявки", "admin:list_requests"), ("Райдеры на проверке", "admin:list_pending_riders")], [("Добавить райдера", "admin:manual_rider")]]),
+        reply_markup=ik([[("Новые заявки", "admin:list_requests"), ("Райдеры на проверке", "admin:list_pending_riders")], [("Одобренные райдеры", "admin:list_approved_riders"), ("Добавить райдера", "admin:manual_rider")]]),
     )
 
 
@@ -122,7 +166,7 @@ async def admin_panel(callback: CallbackQuery, state: FSMContext, db: Database) 
 async def admin_command(message: Message, db: Database) -> None:
     if not await require_admin(message, db):
         return
-    await message.answer("Админ-панель", reply_markup=ik([[("Новые заявки", "admin:list_requests"), ("Райдеры на проверке", "admin:list_pending_riders")], [("Добавить райдера", "admin:manual_rider")]]))
+    await message.answer("Админ-панель", reply_markup=ik([[("Новые заявки", "admin:list_requests"), ("Райдеры на проверке", "admin:list_pending_riders")], [("Одобренные райдеры", "admin:list_approved_riders"), ("Добавить райдера", "admin:manual_rider")]]))
 
 
 @router.callback_query(F.data == "admin:list_requests")
@@ -151,7 +195,230 @@ async def list_pending_riders(callback: CallbackQuery, db: Database) -> None:
         await callback.message.answer("Анкет на проверке нет.")
         return
     for row in rows:
-        await callback.message.answer(rider_card(row), reply_markup=ik([[("Добавить в базу", f"admin:approve_rider:{row['id']}")], [("Отказать", f"admin:reject_rider:{row['id']}")]]))
+        await callback.message.answer(
+            rider_card(row),
+            reply_markup=ik([[("Добавить в базу", f"admin:approve_rider:{row['id']}"), ("Фото", f"admin:rider_photos:{row['id']}")], [("Отказать", f"admin:reject_rider:{row['id']}")]]),
+        )
+
+
+@router.callback_query(F.data == "admin:list_approved_riders")
+async def list_approved_riders(callback: CallbackQuery, db: Database) -> None:
+    if not await require_admin(callback, db):
+        return
+    await callback.answer()
+    rows = await db.fetchall("SELECT * FROM riders WHERE status='approved' ORDER BY id DESC LIMIT 30")
+    if not rows:
+        await callback.message.answer("Одобренных райдеров пока нет.", reply_markup=ik([[("Админ-панель", "admin:panel")]]))
+        return
+    await callback.message.answer(f"Одобренные райдеры: {len(rows)}")
+    for row in rows:
+        await callback.message.answer(
+            f"№{row['id']} - {row['name']}\n{row['motorcycle_model']}\nКласс: {row['motorcycle_class']}\nКак возит: {rider_modes_text(row)}",
+            reply_markup=ik([[("Открыть", f"admin:rider:{row['id']}")]]),
+        )
+
+
+@router.callback_query(F.data.startswith("admin:rider:"))
+async def show_approved_rider(callback: CallbackQuery, db: Database) -> None:
+    if not await require_admin(callback, db):
+        return
+    rider_id = int(callback.data.rsplit(":", 1)[1])
+    row = await db.fetchone("SELECT * FROM riders WHERE id=?", rider_id)
+    if not row or row["status"] != "approved":
+        await callback.answer("Райдер не найден или уже удалён.", show_alert=True)
+        return
+    await callback.answer()
+    await callback.message.answer(rider_card(row), reply_markup=rider_manage_keyboard(rider_id))
+
+
+@router.callback_query(F.data.startswith("admin:rider_photos:"))
+async def show_rider_photos(callback: CallbackQuery, db: Database) -> None:
+    if not await require_admin(callback, db):
+        return
+    rider_id = int(callback.data.rsplit(":", 1)[1])
+    rider = await db.fetchone("SELECT id, status FROM riders WHERE id=?", rider_id)
+    if not rider or rider["status"] not in {"pending", "approved"}:
+        await callback.answer("Райдер не найден или уже удалён.", show_alert=True)
+        return
+    photos = await db.fetchall("SELECT telegram_file_id FROM rider_photos WHERE rider_id=? ORDER BY id", rider_id)
+    if not photos:
+        await callback.answer("Фото у райдера не сохранены.", show_alert=True)
+        return
+    await callback.answer()
+    for photo in photos:
+        await callback.bot.send_photo(callback.from_user.id, photo["telegram_file_id"])
+
+
+@router.callback_query(F.data.startswith("admin:rider_delete_confirm:"))
+async def delete_rider_confirm(callback: CallbackQuery, db: Database) -> None:
+    if not await require_admin(callback, db):
+        return
+    rider_id = int(callback.data.rsplit(":", 1)[1])
+    row = await db.fetchone("SELECT name, status FROM riders WHERE id=?", rider_id)
+    if not row or row["status"] != "approved":
+        await callback.answer("Райдер не найден или уже удалён.", show_alert=True)
+        return
+    await callback.answer()
+    await callback.message.answer(
+        f"Удалить райдера №{rider_id} {row['name']} из активной базы?",
+        reply_markup=ik([[("Удалить", f"admin:rider_delete:{rider_id}")], [("Отмена", f"admin:rider:{rider_id}")]]),
+    )
+
+
+@router.callback_query(F.data.startswith("admin:rider_delete:"))
+async def delete_rider(callback: CallbackQuery, db: Database) -> None:
+    if not await require_admin(callback, db):
+        return
+    rider_id = int(callback.data.rsplit(":", 1)[1])
+    row = await db.fetchone("SELECT status FROM riders WHERE id=?", rider_id)
+    if not row or row["status"] != "approved":
+        await callback.answer("Райдер не найден или уже удалён.", show_alert=True)
+        return
+    await db.execute("UPDATE riders SET status='deleted', updated_at=? WHERE id=?", now(), rider_id)
+    await db.commit()
+    await db.add_admin_log(callback.from_user.id, "delete_rider", "rider", rider_id)
+    await callback.answer("Райдер удалён.")
+    await callback.message.answer(f"Райдер №{rider_id} удалён из активной базы.", reply_markup=ik([[("Одобренные райдеры", "admin:list_approved_riders")], [("Админ-панель", "admin:panel")]]))
+
+
+@router.callback_query(F.data.startswith("admin:rider_edit:"))
+async def edit_rider(callback: CallbackQuery, db: Database) -> None:
+    if not await require_admin(callback, db):
+        return
+    rider_id = int(callback.data.rsplit(":", 1)[1])
+    row = await db.fetchone("SELECT status FROM riders WHERE id=?", rider_id)
+    if not row or row["status"] != "approved":
+        await callback.answer("Райдер не найден или уже удалён.", show_alert=True)
+        return
+    await callback.answer()
+    await callback.message.answer("Что изменить?", reply_markup=rider_edit_keyboard(rider_id))
+
+
+@router.callback_query(F.data.startswith("admin:rider_edit_field:"))
+async def edit_rider_field(callback: CallbackQuery, state: FSMContext, db: Database) -> None:
+    if not await require_admin(callback, db):
+        return
+    _, _, rider_id_raw, field = callback.data.split(":", 3)
+    rider_id = int(rider_id_raw)
+    row = await db.fetchone("SELECT status FROM riders WHERE id=?", rider_id)
+    if not row or row["status"] != "approved":
+        await callback.answer("Райдер не найден или уже удалён.", show_alert=True)
+        return
+    await callback.answer()
+    if field == "class":
+        await callback.message.answer(
+            "Выберите новый класс.",
+            reply_markup=ik([[("Дорожный", f"admin:rider_set:{rider_id}:motorcycle_class:Дорожный"), ("Классик / Кастом", f"admin:rider_set:{rider_id}:motorcycle_class:Классик / Кастом")], [("Спорт", f"admin:rider_set:{rider_id}:motorcycle_class:Спорт"), ("Электро", f"admin:rider_set:{rider_id}:motorcycle_class:Электро")]]),
+        )
+        return
+    if field == "ride_modes":
+        await callback.message.answer(
+            "Выберите, как райдер готов возить.",
+            reply_markup=ik([[("За деньги", f"admin:rider_modes_set:{rider_id}:money"), ("По правилу", f"admin:rider_modes_set:{rider_id}:rules")], [("Оба варианта", f"admin:rider_modes_set:{rider_id}:both")]]),
+        )
+        return
+    if field in {"pickup", "night", "individual"}:
+        columns = {"pickup": "can_pickup_client", "night": "can_ride_night", "individual": "can_individual_route"}
+        await callback.message.answer(
+            "Выберите значение.",
+            reply_markup=ik([[("Да", f"admin:rider_set:{rider_id}:{columns[field]}:1"), ("Нет", f"admin:rider_set:{rider_id}:{columns[field]}:0")]]),
+        )
+        return
+    if field not in EDIT_RIDER_TEXT_FIELDS:
+        await callback.message.answer("Это поле пока нельзя изменить.")
+        return
+    column, _, prompt = EDIT_RIDER_TEXT_FIELDS[field]
+    await state.set_state(AdminFlow.edit_rider_value)
+    await state.update_data(edit_rider_id=rider_id, edit_rider_field=field, edit_rider_column=column)
+    await callback.message.answer(prompt, reply_markup=ik([[("Отмена", f"admin:rider:{rider_id}")]]))
+
+
+@router.callback_query(F.data.startswith("admin:rider_set:"))
+async def set_rider_inline_field(callback: CallbackQuery, db: Database) -> None:
+    if not await require_admin(callback, db):
+        return
+    _, _, rider_id_raw, column, value = callback.data.split(":", 4)
+    rider_id = int(rider_id_raw)
+    allowed = {"motorcycle_class", "can_pickup_client", "can_ride_night", "can_individual_route"}
+    if column not in allowed:
+        await callback.answer("Поле недоступно.", show_alert=True)
+        return
+    await db.execute(f"UPDATE riders SET {column}=?, updated_at=? WHERE id=? AND status='approved'", value, now(), rider_id)
+    await db.commit()
+    await db.add_admin_log(callback.from_user.id, f"edit_rider_{column}", "rider", rider_id)
+    row = await db.fetchone("SELECT * FROM riders WHERE id=?", rider_id)
+    await callback.answer("Сохранено.")
+    await callback.message.answer(rider_card(row), reply_markup=rider_manage_keyboard(rider_id))
+
+
+@router.callback_query(F.data.startswith("admin:rider_modes_set:"))
+async def set_rider_modes(callback: CallbackQuery, db: Database) -> None:
+    if not await require_admin(callback, db):
+        return
+    _, _, rider_id_raw, value = callback.data.split(":", 3)
+    rider_id = int(rider_id_raw)
+    ride_for_money = value in {"money", "both"}
+    ride_by_rules = value in {"rules", "both"}
+    await db.execute(
+        "UPDATE riders SET ride_for_money=?, ride_by_rules=?, updated_at=? WHERE id=? AND status='approved'",
+        int(ride_for_money),
+        int(ride_by_rules),
+        now(),
+        rider_id,
+    )
+    await db.commit()
+    await db.add_admin_log(callback.from_user.id, "edit_rider_modes", "rider", rider_id)
+    row = await db.fetchone("SELECT * FROM riders WHERE id=?", rider_id)
+    await callback.answer("Сохранено.")
+    await callback.message.answer(rider_card(row), reply_markup=rider_manage_keyboard(rider_id))
+
+
+@router.message(AdminFlow.edit_rider_value)
+async def save_rider_text_field(message: Message, state: FSMContext, db: Database) -> None:
+    if not await require_admin(message, db):
+        return
+    data = await state.get_data()
+    rider_id = data["edit_rider_id"]
+    field = data["edit_rider_field"]
+    column = data["edit_rider_column"]
+    value = (message.text or "").strip()
+    if field in {"name", "model", "equipment", "area"} and len(value) < 2:
+        await message.answer("Значение слишком короткое. Попробуйте ещё раз.")
+        return
+    if field == "username":
+        value = None if value == "-" else value.lstrip("@")
+    elif field == "telegram_id":
+        if value == "-":
+            value = None
+        elif value.isdigit():
+            value = int(value)
+        else:
+            await message.answer("Telegram ID должен быть числом или '-'.")
+            return
+    elif field == "age":
+        if not value.isdigit() or not 18 <= int(value) <= 80:
+            await message.answer("Возраст должен быть числом от 18 до 80.")
+            return
+        value = int(value)
+    elif field == "seasons":
+        if not value.isdigit() or int(value) < 0:
+            await message.answer("Опыт должен быть числом.")
+            return
+        value = int(value)
+    elif field == "max_weight":
+        if not value.isdigit() or not 35 <= int(value) <= 220:
+            await message.answer("Вес должен быть числом от 35 до 220.")
+            return
+        value = int(value)
+    elif field == "comment":
+        value = "" if value == "-" else value
+
+    await db.execute(f"UPDATE riders SET {column}=?, updated_at=? WHERE id=? AND status='approved'", value, now(), rider_id)
+    await db.commit()
+    await db.add_admin_log(message.from_user.id, f"edit_rider_{column}", "rider", rider_id)
+    await state.clear()
+    row = await db.fetchone("SELECT * FROM riders WHERE id=?", rider_id)
+    await message.answer("Сохранено.\n\n" + rider_card(row), reply_markup=rider_manage_keyboard(rider_id))
 
 
 @router.callback_query(F.data.startswith("admin:approve_rider:"))
