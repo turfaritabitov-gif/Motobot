@@ -72,6 +72,12 @@ CREATE TABLE IF NOT EXISTS riders (
     base_area TEXT,
     status TEXT NOT NULL DEFAULT 'pending',
     admin_comment TEXT,
+    completed_trips INTEGER NOT NULL DEFAULT 0,
+    rating_count INTEGER NOT NULL DEFAULT 0,
+    rating_sum_total INTEGER NOT NULL DEFAULT 0,
+    rating_sum_transport INTEGER NOT NULL DEFAULT 0,
+    rating_sum_politeness INTEGER NOT NULL DEFAULT 0,
+    rating_sum_driving INTEGER NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
@@ -91,6 +97,48 @@ CREATE TABLE IF NOT EXISTS rider_responses (
     response_status TEXT NOT NULL,
     comment TEXT,
     created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS request_rejected_riders (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    request_id INTEGER NOT NULL,
+    rider_id INTEGER NOT NULL,
+    created_at TEXT NOT NULL,
+    UNIQUE(request_id, rider_id)
+);
+
+CREATE TABLE IF NOT EXISTS ride_feedback (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    request_id INTEGER NOT NULL,
+    rider_id INTEGER NOT NULL,
+    client_telegram_id INTEGER NOT NULL,
+    transport_score INTEGER NOT NULL,
+    politeness_score INTEGER NOT NULL,
+    driving_score INTEGER NOT NULL,
+    created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS trip_reports (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    request_id INTEGER NOT NULL,
+    reporter_role TEXT NOT NULL,
+    telegram_id INTEGER NOT NULL,
+    did_happen INTEGER NOT NULL,
+    payment_received INTEGER,
+    reason TEXT,
+    created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS scheduled_notifications (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    request_id INTEGER NOT NULL,
+    target_role TEXT NOT NULL,
+    target_telegram_id INTEGER NOT NULL,
+    kind TEXT NOT NULL,
+    due_at TEXT NOT NULL,
+    sent_at TEXT,
+    created_at TEXT NOT NULL,
+    UNIQUE(request_id, target_role, kind)
 );
 
 CREATE TABLE IF NOT EXISTS settings (
@@ -175,6 +223,16 @@ class Database:
             await self.execute("ALTER TABLE riders ADD COLUMN ride_for_money INTEGER NOT NULL DEFAULT 1")
         if "ride_by_rules" not in existing:
             await self.execute("ALTER TABLE riders ADD COLUMN ride_by_rules INTEGER NOT NULL DEFAULT 0")
+        for column in (
+            "completed_trips",
+            "rating_count",
+            "rating_sum_total",
+            "rating_sum_transport",
+            "rating_sum_politeness",
+            "rating_sum_driving",
+        ):
+            if column not in existing:
+                await self.execute(f"ALTER TABLE riders ADD COLUMN {column} INTEGER NOT NULL DEFAULT 0")
 
     async def close(self) -> None:
         if self.conn:

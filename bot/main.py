@@ -7,6 +7,7 @@ from aiogram.fsm.storage.memory import MemoryStorage
 from bot.config import Config, load_config
 from bot.db import Database
 from bot.handlers import admin, client, common, rider
+from bot.services.trips import scheduler_loop
 
 
 async def main() -> None:
@@ -23,10 +24,12 @@ async def main() -> None:
     dp.include_router(client.router)
     dp.include_router(rider.router)
     dp.include_router(admin.router)
+    scheduler_task = asyncio.create_task(scheduler_loop(bot, db))
 
     try:
         await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
     finally:
+        scheduler_task.cancel()
         await db.close()
         await bot.session.close()
 

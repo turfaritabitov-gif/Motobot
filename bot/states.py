@@ -44,6 +44,14 @@ class RiderFlow(StatesGroup):
     confirm = State()
 
 
+class TripFlow(StatesGroup):
+    client_no_reason = State()
+    client_rating_transport = State()
+    client_rating_politeness = State()
+    client_rating_driving = State()
+    rider_no_reason = State()
+
+
 class AdminFlow(StatesGroup):
     message_target = State()
     reject_client = State()

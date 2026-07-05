@@ -8,7 +8,8 @@ from bot.config import Config
 from bot.db import Database, now
 from bot.keyboards import ik, location_keyboard, nav, phone_keyboard, remove_keyboard
 from bot.services.pricing import calculate_price
-from bot.states import ClientFlow
+from bot.services.trips import schedule_trip_notifications
+from bot.states import ClientFlow, TripFlow
 from bot.texts import CONSENT
 
 router = Router()
@@ -21,6 +22,25 @@ RIDE_MODES = {
     "money": "За деньги",
     "rules": "По правилам",
 }
+
+
+def share_text() -> str:
+    return "Спасибо! Будем рады видеть вас снова. Поделитесь ботом с друзьями: @motoprog_bot"
+
+
+def score_keyboard(prefix: str):
+    return ik([[(str(i), f"{prefix}:{i}") for i in range(1, 6)]])
+
+
+def rider_card_for_client(row) -> str:
+    return (
+        f"Райдер: {row['name']}\n"
+        f"Возраст: {row['age']} лет\n"
+        f"Опыт: {row['seasons']} сезонов\n"
+        f"Мотоцикл: {row['motorcycle_model']}\n"
+        f"Класс: {row['motorcycle_class']}\n"
+        f"Экип: {row['passenger_equipment']}"
+    )
 
 
 def class_keyboard(weight: int | None = None):
@@ -436,3 +456,287 @@ async def submit(callback: CallbackQuery, state: FSMContext, db: Database, confi
         except Exception:
             pass
     await state.clear()
+
+
+async def notify_admins(bot, db: Database, config: Config, text: str, reply_markup=None) -> None:
+    for admin_id in await admin_chat_ids(db, config):
+        try:
+            await bot.send_message(admin_id, text, reply_markup=reply_markup)
+        except Exception:
+            pass
+
+
+async def confirm_trip(bot, db: Database, request_id: int, rider_id: int) -> tuple[bool, str]:
+    req = await db.fetchone("SELECT * FROM client_requests WHERE id=?", request_id)
+    rider = await db.fetchone("SELECT * FROM riders WHERE id=?", rider_id)
+    if not req or not rider or req["telegram_id"] is None or not rider["telegram_id"]:
+        return False, "Заявка или райдер не найдены."
+    await db.execute("UPDATE client_requests SET status='trip_confirmed', assigned_rider_id=?, updated_at=? WHERE id=?", rider_id, now(), request_id)
+    await db.commit()
+    await schedule_trip_notifications(db, request_id)
+    price = "индивидуально" if req["is_individual_price"] else f"{req['final_price']} руб."
+    await bot.send_message(
+        req["telegram_id"],
+        (
+            "Поездка согласована.\n\n"
+            f"{rider_card_for_client(rider)}\n"
+            f"Дата: {req['date']}\n"
+            f"Время: {req['time_slot']}\n"
+            f"Точка посадки: {req['pickup_address']}\n"
+            f"Предварительная стоимость: {price}\n\n"
+            f"{share_text()}"
+        ),
+    )
+    await bot.send_message(
+        rider["telegram_id"],
+        (
+            f"Клиент подтвердил заявку №{request_id}.\n\n"
+            f"Клиент: {req['client_name']}\n"
+            f"Контакт: {req['client_phone'] or req['client_username'] or 'через бота'}\n"
+            f"Дата: {req['date']}\n"
+            f"Время: {req['time_slot']}\n"
+            f"Точка посадки: {req['pickup_address']}\n"
+            f"Маршрут: {req['route_type']}"
+        ),
+    )
+    return True, "Поездка согласована."
+
+
+@router.callback_query(F.data.startswith("client:rider_accept:"))
+async def client_accept_rider(callback: CallbackQuery, db: Database, config: Config) -> None:
+    _, _, request_id_raw, rider_id_raw = callback.data.split(":")
+    request_id, rider_id = int(request_id_raw), int(rider_id_raw)
+    req = await db.fetchone("SELECT status, assigned_rider_id FROM client_requests WHERE id=? AND telegram_id=?", request_id, callback.from_user.id)
+    if not req or req["status"] != "rider_assigned" or req["assigned_rider_id"] != rider_id:
+        await callback.answer("Это согласование уже неактуально.", show_alert=True)
+        return
+    ok, message = await confirm_trip(callback.bot, db, request_id, rider_id)
+    await callback.answer(message, show_alert=not ok)
+    if ok:
+        await notify_admins(callback.bot, db, config, f"Клиент подтвердил райдера по заявке №{request_id}.")
+
+
+@router.callback_query(F.data.startswith("client:rider_reject:"))
+async def client_reject_rider(callback: CallbackQuery, db: Database, config: Config) -> None:
+    _, _, request_id_raw, rider_id_raw = callback.data.split(":")
+    request_id, rider_id = int(request_id_raw), int(rider_id_raw)
+    req = await db.fetchone("SELECT status, assigned_rider_id FROM client_requests WHERE id=? AND telegram_id=?", request_id, callback.from_user.id)
+    if not req or req["status"] != "rider_assigned" or req["assigned_rider_id"] != rider_id:
+        await callback.answer("Это согласование уже неактуально.", show_alert=True)
+        return
+    await db.execute("INSERT OR IGNORE INTO request_rejected_riders(request_id, rider_id, created_at) VALUES(?, ?, ?)", request_id, rider_id, now())
+    await db.execute("UPDATE client_requests SET status='rider_accepted', assigned_rider_id=NULL, updated_at=? WHERE id=?", now(), request_id)
+    await db.commit()
+    await callback.answer()
+    await callback.message.answer("Поняли. Предложим администратору подобрать нового райдера.")
+    await notify_admins(
+        callback.bot,
+        db,
+        config,
+        f"Клиент отказался от райдера по заявке №{request_id}. Нужно подобрать нового из откликнувшихся.",
+        reply_markup=ik([[("Выбрать другого райдера", f"admin:choose_alt:{request_id}")]]),
+    )
+
+
+@router.callback_query(F.data.startswith("client:show_rejected:"))
+async def show_rejected_riders(callback: CallbackQuery, db: Database) -> None:
+    request_id = int(callback.data.rsplit(":", 1)[1])
+    req = await db.fetchone("SELECT telegram_id, status FROM client_requests WHERE id=?", request_id)
+    if not req or req["telegram_id"] != callback.from_user.id or req["status"] == "trip_confirmed":
+        await callback.answer("Список уже неактуален.", show_alert=True)
+        return
+    rows = await db.fetchall(
+        """
+        SELECT r.* FROM request_rejected_riders rr
+        JOIN riders r ON r.id=rr.rider_id
+        WHERE rr.request_id=? AND r.status='approved'
+        ORDER BY rr.created_at
+        """,
+        request_id,
+    )
+    if not rows:
+        await callback.answer("Ранее отклонённых райдеров нет.", show_alert=True)
+        return
+    await callback.answer()
+    await callback.message.answer("Ранее отклонённые райдеры:")
+    for rider in rows:
+        await callback.message.answer(
+            rider_card_for_client(rider),
+            reply_markup=ik([[("Выбрать этого райдера", f"client:choose_rejected:{request_id}:{rider['id']}")]]),
+        )
+
+
+@router.callback_query(F.data.startswith("client:choose_rejected:"))
+async def choose_rejected_rider(callback: CallbackQuery, db: Database, config: Config) -> None:
+    _, _, request_id_raw, rider_id_raw = callback.data.split(":")
+    request_id, rider_id = int(request_id_raw), int(rider_id_raw)
+    req = await db.fetchone("SELECT telegram_id, status FROM client_requests WHERE id=?", request_id)
+    if not req or req["telegram_id"] != callback.from_user.id or req["status"] == "trip_confirmed":
+        await callback.answer("Выбор уже неактуален.", show_alert=True)
+        return
+    ok, message = await confirm_trip(callback.bot, db, request_id, rider_id)
+    await callback.answer(message, show_alert=not ok)
+    if ok:
+        await notify_admins(callback.bot, db, config, f"Клиент выбрал ранее отклонённого райдера по заявке №{request_id}.")
+
+
+@router.callback_query(F.data.startswith("trip:client:"))
+async def client_trip_report(callback: CallbackQuery, state: FSMContext, db: Database) -> None:
+    _, _, answer, request_id_raw = callback.data.split(":")
+    request_id = int(request_id_raw)
+    req = await db.fetchone("SELECT * FROM client_requests WHERE id=? AND telegram_id=?", request_id, callback.from_user.id)
+    if not req:
+        await callback.answer("Заявка не найдена.", show_alert=True)
+        return
+    await callback.answer()
+    if answer == "no":
+        await state.set_state(TripFlow.client_no_reason)
+        await state.update_data(report_request_id=request_id)
+        await callback.message.answer("Укажите, пожалуйста, причину в свободной форме.")
+        return
+    await state.set_state(TripFlow.client_rating_transport)
+    await state.update_data(report_request_id=request_id)
+    await callback.message.answer("Оцените состояние транспорта от 1 до 5.", reply_markup=score_keyboard("trip:score:transport"))
+
+
+@router.callback_query(F.data.startswith("trip:score:"))
+async def client_score(callback: CallbackQuery, state: FSMContext, db: Database) -> None:
+    _, _, field, score_raw = callback.data.split(":")
+    score = int(score_raw)
+    data = await state.get_data()
+    if field == "transport":
+        await state.update_data(transport_score=score)
+        await state.set_state(TripFlow.client_rating_politeness)
+        await callback.answer()
+        await callback.message.answer("Оцените вежливость райдера от 1 до 5.", reply_markup=score_keyboard("trip:score:politeness"))
+        return
+    if field == "politeness":
+        await state.update_data(politeness_score=score)
+        await state.set_state(TripFlow.client_rating_driving)
+        await callback.answer()
+        await callback.message.answer("Оцените манеру вождения от 1 до 5.", reply_markup=score_keyboard("trip:score:driving"))
+        return
+    request_id = data["report_request_id"]
+    req = await db.fetchone("SELECT * FROM client_requests WHERE id=?", request_id)
+    existing = await db.fetchone("SELECT id FROM ride_feedback WHERE request_id=? AND client_telegram_id=?", request_id, callback.from_user.id)
+    if existing:
+        await state.clear()
+        await callback.answer("Оценка уже сохранена.", show_alert=True)
+        return
+    transport = data["transport_score"]
+    politeness = data["politeness_score"]
+    driving = score
+    rider_id = req["assigned_rider_id"]
+    await db.execute(
+        "INSERT INTO ride_feedback(request_id, rider_id, client_telegram_id, transport_score, politeness_score, driving_score, created_at) VALUES(?, ?, ?, ?, ?, ?, ?)",
+        request_id,
+        rider_id,
+        callback.from_user.id,
+        transport,
+        politeness,
+        driving,
+        now(),
+    )
+    await db.execute(
+        """
+        UPDATE riders SET
+            completed_trips=completed_trips+1,
+            rating_count=rating_count+3,
+            rating_sum_total=rating_sum_total+?,
+            rating_sum_transport=rating_sum_transport+?,
+            rating_sum_politeness=rating_sum_politeness+?,
+            rating_sum_driving=rating_sum_driving+?,
+            updated_at=?
+        WHERE id=?
+        """,
+        transport + politeness + driving,
+        transport,
+        politeness,
+        driving,
+        now(),
+        rider_id,
+    )
+    await db.execute("INSERT INTO trip_reports(request_id, reporter_role, telegram_id, did_happen, created_at) VALUES(?, 'client', ?, 1, ?)", request_id, callback.from_user.id, now())
+    await db.commit()
+    await state.clear()
+    await callback.answer("Спасибо за оценку.")
+    await callback.message.answer(share_text())
+
+
+@router.message(TripFlow.client_no_reason)
+async def client_no_reason(message: Message, state: FSMContext, db: Database, config: Config) -> None:
+    data = await state.get_data()
+    request_id = data["report_request_id"]
+    reason = (message.text or "").strip()
+    await db.execute(
+        "INSERT INTO trip_reports(request_id, reporter_role, telegram_id, did_happen, reason, created_at) VALUES(?, 'client', ?, 0, ?, ?)",
+        request_id,
+        message.from_user.id,
+        reason,
+        now(),
+    )
+    await db.commit()
+    await state.clear()
+    await notify_admins(message.bot, db, config, f"Клиент сообщил, что поездка №{request_id} не состоялась.\nПричина: {reason}")
+    await message.answer(share_text())
+
+
+@router.callback_query(F.data.startswith("trip:rider:"))
+async def rider_trip_report(callback: CallbackQuery, state: FSMContext, db: Database) -> None:
+    _, _, answer, request_id_raw = callback.data.split(":")
+    request_id = int(request_id_raw)
+    req = await db.fetchone("SELECT * FROM client_requests WHERE id=?", request_id)
+    rider = await db.fetchone("SELECT * FROM riders WHERE id=? AND telegram_id=?", req["assigned_rider_id"], callback.from_user.id) if req else None
+    if not req or not rider:
+        await callback.answer("Заявка не найдена.", show_alert=True)
+        return
+    await callback.answer()
+    if answer == "no":
+        await state.set_state(TripFlow.rider_no_reason)
+        await state.update_data(report_request_id=request_id)
+        await callback.message.answer("Укажите, пожалуйста, причину в свободной форме.")
+        return
+    if req["ride_mode"] == "money":
+        await callback.message.answer("Клиент произвёл расчёт с вами?", reply_markup=ik([[("Да", f"trip:rider_payment:yes:{request_id}"), ("Нет", f"trip:rider_payment:no:{request_id}")]]))
+        return
+    await db.execute("INSERT INTO trip_reports(request_id, reporter_role, telegram_id, did_happen, created_at) VALUES(?, 'rider', ?, 1, ?)", request_id, callback.from_user.id, now())
+    await db.commit()
+    await callback.message.answer(share_text())
+
+
+@router.callback_query(F.data.startswith("trip:rider_payment:"))
+async def rider_payment_report(callback: CallbackQuery, db: Database) -> None:
+    _, _, answer, request_id_raw = callback.data.split(":")
+    request_id = int(request_id_raw)
+    payment_received = answer == "yes"
+    await db.execute(
+        "INSERT INTO trip_reports(request_id, reporter_role, telegram_id, did_happen, payment_received, created_at) VALUES(?, 'rider', ?, 1, ?, ?)",
+        request_id,
+        callback.from_user.id,
+        int(payment_received),
+        now(),
+    )
+    await db.commit()
+    await callback.answer()
+    if payment_received:
+        await callback.message.answer("Спасибо! Если хотите поддержать сообщество, можно отправить донат в Мото помощь. " + share_text())
+    else:
+        await callback.message.answer(share_text())
+
+
+@router.message(TripFlow.rider_no_reason)
+async def rider_no_reason(message: Message, state: FSMContext, db: Database, config: Config) -> None:
+    data = await state.get_data()
+    request_id = data["report_request_id"]
+    reason = (message.text or "").strip()
+    await db.execute(
+        "INSERT INTO trip_reports(request_id, reporter_role, telegram_id, did_happen, reason, created_at) VALUES(?, 'rider', ?, 0, ?, ?)",
+        request_id,
+        message.from_user.id,
+        reason,
+        now(),
+    )
+    await db.commit()
+    await state.clear()
+    await notify_admins(message.bot, db, config, f"Райдер сообщил, что поездка №{request_id} не состоялась.\nПричина: {reason}")
+    await message.answer(share_text())

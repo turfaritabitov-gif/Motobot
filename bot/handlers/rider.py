@@ -113,6 +113,13 @@ async def rider_seasons(message: Message, state: FSMContext) -> None:
     if not (message.text or "").isdigit() or int(message.text) < 0:
         await message.answer("Укажите опыт числом.")
         return
+    if int(message.text) < 3:
+        await state.clear()
+        await message.answer(
+            "Спасибо за интерес к проекту. Сейчас минимальное требование для райдера - от 3 сезонов вождения. К сожалению, мы не можем принять анкету.",
+            reply_markup=nav(),
+        )
+        return
     await state.update_data(seasons=int(message.text))
     await state.set_state(RiderFlow.motorcycle_class)
     await message.answer("Выберите класс мотоцикла.", reply_markup=ik([[("Дорожный", "rider:class:Дорожный"), ("Классик / Кастом", "rider:class:Классик / Кастом")], [("Спорт", "rider:class:Спорт"), ("Электро", "rider:class:Электро")]]))

@@ -83,6 +83,10 @@ def request_card(row) -> str:
 
 
 def rider_card(row) -> str:
+    overall = row["rating_sum_total"] / row["rating_count"] if row["rating_count"] else 0
+    transport = row["rating_sum_transport"] / row["completed_trips"] if row["completed_trips"] else 0
+    politeness = row["rating_sum_politeness"] / row["completed_trips"] if row["completed_trips"] else 0
+    driving = row["rating_sum_driving"] / row["completed_trips"] if row["completed_trips"] else 0
     return (
         f"Райдер №{row['id']}: {row['name']}\n"
         f"Telegram: @{row['username'] or '-'} / ID {row['telegram_id'] or '-'}\n"
@@ -97,7 +101,12 @@ def rider_card(row) -> str:
         f"Ночь: {'да' if row['can_ride_night'] else 'нет'}\n"
         f"Индивидуальные маршруты: {'да' if row['can_individual_route'] else 'нет'}\n"
         f"Район: {row['base_area'] or '-'}\n"
-        f"Комментарий: {row['admin_comment'] or '-'}"
+        f"Комментарий: {row['admin_comment'] or '-'}\n"
+        f"Количество поездок: {row['completed_trips']}\n"
+        f"Средняя оценка: {overall:.2f}\n"
+        f"Состояние транспорта: {transport:.2f}\n"
+        f"Вежливость райдера: {politeness:.2f}\n"
+        f"Манера вождения: {driving:.2f}"
     )
 
 
@@ -512,6 +521,52 @@ async def matching_riders(db: Database, request_id: int):
     return req, rows
 
 
+async def accepted_riders_for_request(db: Database, request_id: int, include_rejected: bool = False):
+    rejected_filter = "" if include_rejected else "AND rrj.rider_id IS NULL"
+    return await db.fetchall(
+        f"""
+        SELECT r.* FROM rider_responses resp
+        JOIN riders r ON r.id=resp.rider_id
+        LEFT JOIN request_rejected_riders rrj ON rrj.request_id=resp.request_id AND rrj.rider_id=resp.rider_id
+        WHERE resp.request_id=?
+          AND resp.response_status='accepted'
+          AND r.status='approved'
+          {rejected_filter}
+        GROUP BY r.id
+        ORDER BY resp.created_at
+        """,
+        request_id,
+    )
+
+
+@router.callback_query(F.data.startswith("admin:choose_alt:"))
+async def choose_alternative_rider(callback: CallbackQuery, db: Database) -> None:
+    if not await require_admin(callback, db):
+        return
+    request_id = int(callback.data.rsplit(":", 1)[1])
+    req = await db.fetchone("SELECT * FROM client_requests WHERE id=?", request_id)
+    if not req:
+        await callback.answer("Заявка не найдена.", show_alert=True)
+        return
+    if req["status"] in {"trip_confirmed", "rejected"}:
+        await callback.answer("Эта заявка уже отработана.", show_alert=True)
+        return
+    riders = await accepted_riders_for_request(db, request_id)
+    if not riders:
+        await callback.answer()
+        await callback.message.answer("Откликнувшихся райдеров без отказа клиента больше нет.")
+        await callback.bot.send_message(
+            req["telegram_id"],
+            "Откликнувшихся райдеров больше нет. Можно выбрать из ранее отклонённых.",
+            reply_markup=ik([[("Показать ранее отклонённых", f"client:show_rejected:{request_id}")]]),
+        )
+        return
+    await callback.answer()
+    await callback.message.answer(f"Доступные откликнувшиеся райдеры по заявке №{request_id}:")
+    for rider in riders:
+        await callback.message.answer(rider_card(rider), reply_markup=ik([[("Предложить клиенту", f"admin:assign:{request_id}:{rider['id']}")]]))
+
+
 @router.callback_query(F.data.startswith("admin:send_riders:"))
 async def send_to_riders(callback: CallbackQuery, db: Database, config: Config) -> None:
     if not await require_admin(callback, db):
@@ -558,8 +613,10 @@ async def rider_response(callback: CallbackQuery, db: Database, config: Config) 
     action, request_id, rider_id = parts[1], int(parts[2]), int(parts[3])
     status = "accepted" if action == "accept" else "declined"
     await db.execute("INSERT INTO rider_responses(request_id, rider_id, response_status, created_at) VALUES(?, ?, ?, ?)", request_id, rider_id, status, now())
+    req = await db.fetchone("SELECT status FROM client_requests WHERE id=?", request_id)
     if status == "accepted":
-        await db.execute("UPDATE client_requests SET status='rider_accepted', updated_at=? WHERE id=?", now(), request_id)
+        if req and req["status"] not in {"rider_assigned", "trip_confirmed", "rejected"}:
+            await db.execute("UPDATE client_requests SET status='rider_accepted', updated_at=? WHERE id=?", now(), request_id)
     await db.commit()
     rider = await db.fetchone("SELECT * FROM riders WHERE id=?", rider_id)
     if status == "accepted":
@@ -587,7 +644,7 @@ async def assign_rider(callback: CallbackQuery, db: Database, config: Config) ->
     if not req or not rider:
         await callback.answer("Не найдено.", show_alert=True)
         return
-    if req["status"] == "rider_assigned" or req["status"] == "rejected":
+    if req["status"] in {"rider_assigned", "trip_confirmed", "rejected"}:
         await callback.answer("Эта заявка клиента уже отработана, повторно её обработать нельзя.", show_alert=True)
         await callback.message.answer("Эта заявка клиента уже отработана, повторно её обработать нельзя.")
         return
@@ -598,7 +655,7 @@ async def assign_rider(callback: CallbackQuery, db: Database, config: Config) ->
     await callback.bot.send_message(
         req["telegram_id"],
         (
-            "Вас готов прокатить:\n\n"
+            "Администратор подобрал райдера:\n\n"
             f"Райдер: {rider['name']}\n"
             f"Возраст: {rider['age']} лет\n"
             f"Опыт: {rider['seasons']} сезонов\n"
@@ -608,24 +665,24 @@ async def assign_rider(callback: CallbackQuery, db: Database, config: Config) ->
             f"Время: {req['time_slot']}\n"
             f"Точка посадки: {req['pickup_address']}\n"
             f"Предварительная стоимость: {price}\n\n"
-            "Администратор или райдер дополнительно подтвердит детали перед прогулкой."
+            "Подтвердите, пожалуйста, подходит ли вам этот райдер."
         ),
+        reply_markup=ik([[("Принять", f"client:rider_accept:{request_id}:{rider_id}")], [("Отказаться", f"client:rider_reject:{request_id}:{rider_id}")]]),
     )
     await callback.bot.send_message(
         rider["telegram_id"],
         (
-            f"Вы назначены на заявку №{request_id}.\n\n"
-            f"Клиент: {req['client_name']}\n"
-            f"Контакт: {req['client_phone'] or req['client_username'] or 'через бота'}\n"
+            f"Администратор предложил вас клиенту по заявке №{request_id}.\n\n"
             f"Формат катания: {RIDE_MODES.get(req['ride_mode'], 'За деньги')}\n"
             f"Дата: {req['date']}\n"
             f"Время: {req['time_slot']}\n"
             f"Точка посадки: {req['pickup_address']}\n"
-            f"Маршрут: {req['route_type']}"
+            f"Маршрут: {req['route_type']}\n\n"
+            "Ожидаем подтверждение клиента."
         ),
     )
-    await callback.answer("Райдер назначен.")
-    await callback.message.answer(f"Райдер №{rider_id} назначен на заявку №{request_id}.")
+    await callback.answer("Карточка отправлена клиенту.")
+    await callback.message.answer(f"Райдер №{rider_id} отправлен клиенту на согласование по заявке №{request_id}.")
     await notify_other_admins(callback.bot, db, config, callback.from_user.id, f"Клиентская заявка №{request_id} уже отработана другим администратором.")
 
 
